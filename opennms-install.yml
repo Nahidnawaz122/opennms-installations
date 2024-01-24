@@ -1,0 +1,124 @@
+---
+- name: Install and Configure OpenNMS on Ubuntu 22.04
+  hosts: demo
+  become: yes
+
+  vars:
+    admin_password: "admin"  # Replace with your desired OpenNMS admin password
+
+  tasks:
+    - name: Update system
+      apt:
+        update_cache: yes
+
+    - name: Set Timezone to Asia/Kolkata
+      become: yes
+      command: timedatectl set-timezone Asia/Kolkata
+
+    - name: Install required packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - openjdk-8-jdk
+        - postgresql
+        - postgresql-contrib
+        - snmp
+        - python3-pip
+        - libpq-dev
+        - chrony
+
+    - name: Install Psycopg2 using pip3
+      become: yes
+      pip:
+        name: psycopg2
+        executable: pip3
+
+    - name: Change directory to /
+      command: /bin/true
+      args:
+        chdir: /
+
+    - name: Create OpenNMS database
+      postgresql_db:
+        name: opennms
+        state: present
+      become_user: postgres
+
+    - name: Create OpenNMS database user
+      postgresql_user:
+        db: opennms
+        name: opennms
+        password: "{{ admin_password }}"
+        role_attr_flags: CREATEDB,CREATEROLE,SUPERUSER
+        state: present
+      become_user: postgres
+
+    - name: creating user
+      shell: |
+        cd /opt;
+        sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '{{ admin_password }}';"
+
+    - name: Add the OpenNMS repository
+      become: true
+      blockinfile:
+        path: /etc/apt/sources.list.d/opennms.list
+        create: yes
+        block: |
+          deb https://debian.opennms.org opennms-32 main
+          deb-src https://debian.opennms.org opennms-32 main
+
+    - name: Import OpenNMS GPG key
+      apt_key:
+        url: 'https://debian.opennms.org/OPENNMS-GPG-KEY'
+        state: present
+
+    - name: Add OpenNMS APT repository
+      apt_repository:
+        repo: 'deb https://debian.opennms.org stable main'
+        state: present
+      register: repo_result
+
+    - name: Update APT package cache
+      apt:
+        update_cache: yes
+      when: repo_result.changed
+
+    - name: Install OpenNMS
+      apt:
+        name: opennms
+        state: present
+
+    - name: Replace opennms password
+      replace:
+        path: /usr/share/opennms/etc/opennms-datasources.xml
+        regexp: '^(.*password=")(.*)(".*)$'
+        replace: '\1{{ admin_password }}\3'
+      when: "'opennms' in lookup('file', '/usr/share/opennms/etc/opennms-datasources.xml')"
+
+    - name: Replace postgres password
+      replace:
+        path: /usr/share/opennms/etc/opennms-datasources.xml
+        regexp: '^(.*password=")(.*)(".*)$'
+        replace: '\1{{ admin_password }}\3'
+      when: "'postgres' in lookup('file', '/usr/share/opennms/etc/opennms-datasources.xml')"
+
+
+    - name: Persist Java environment in /usr/share/opennms/etc/java.conf
+      shell: /usr/share/opennms/bin/runjava -s
+
+    - name: Reload Daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Import OpenNMS database schema
+      command: >
+       sudo /usr/share/opennms/bin/install -dis
+
+    - name: Start OpenNMS services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      with_items:
+        - opennms
